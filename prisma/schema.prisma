@@ -1,0 +1,477 @@
+// ─────────────────────────────────────────────────────────────────
+// PolicyDiff — Prisma Schema
+// ─────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// AUTH  (NextAuth v5 / Auth.js tables)
+// ═══════════════════════════════════════════════════════════════════
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String  @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique @map("session_token")
+  userId       String   @map("user_id")
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// MULTI-TENANT CORE
+// ═══════════════════════════════════════════════════════════════════
+
+model Agency {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  logoUrl   String?  @map("logo_url")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Billing Contact
+  billingContactEmail String? @map("billing_contact_email")
+
+  // Configurable retention override (days). null = use system default.
+  retentionDays Int? @map("retention_days")
+
+  users        User[]
+  policyChecks PolicyCheck[]
+  auditLogs    AuditLog[]
+  subscription Subscription?
+  invoices     Invoice[]
+
+  @@map("agencies")
+}
+
+enum SubscriptionPlan {
+  TRIAL
+  STARTER
+  GROWTH
+}
+
+enum BillingPeriod {
+  MONTHLY
+  ANNUAL
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  ACTIVE
+  GRACE
+  SUSPENDED
+  CANCELLED
+}
+
+model Subscription {
+  id                 String             @id @default(cuid())
+  agencyId           String             @unique @map("agency_id")
+  plan               SubscriptionPlan   @default(TRIAL)
+  billingPeriod      BillingPeriod      @default(MONTHLY) @map("billing_period")
+  status             SubscriptionStatus @default(TRIAL)
+  currentPeriodStart DateTime           @default(now()) @map("current_period_start")
+  currentPeriodEnd   DateTime           @map("current_period_end")
+  checksLimit        Int                @default(3) @map("checks_limit")
+  checksUsed         Int                @default(0) @map("checks_used")
+  trialEndsAt        DateTime?          @map("trial_ends_at")
+  graceStartsAt      DateTime?          @map("grace_starts_at")
+  suspendedAt        DateTime?          @map("suspended_at")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+
+  agency   Agency    @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  invoices Invoice[]
+
+  @@map("subscriptions")
+}
+
+enum InvoiceStatus {
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  VOID
+}
+
+model Invoice {
+  id                  String        @id @default(cuid())
+  invoiceNumber       String        @unique @map("invoice_number") // e.g. PD-2026-0001
+  agencyId            String        @map("agency_id")
+  subscriptionId      String?       @map("subscription_id")
+  amountCents         Int           @map("amount_cents")
+  amountPaidCents     Int           @default(0) @map("amount_paid_cents")
+  currency            String        @default("USD")
+  plan                SubscriptionPlan
+  billingPeriod       BillingPeriod @map("billing_period")
+  status              InvoiceStatus @default(ISSUED)
+  issueDate           DateTime      @default(now()) @map("issue_date")
+  dueDate             DateTime      @map("due_date") // net 7 days
+  paidAt              DateTime?     @map("paid_at")
+  billingContactEmail String        @map("billing_contact_email")
+  notes               String?       @db.Text
+
+  payments     InvoicePayment[]
+  createdAt    DateTime         @default(now()) @map("created_at")
+  updatedAt    DateTime         @updatedAt @map("updated_at")
+
+  agency       Agency        @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@index([agencyId])
+  @@index([status])
+  @@index([dueDate])
+  @@map("invoices")
+}
+
+model InvoicePayment {
+  id               String   @id @default(cuid())
+  invoiceId        String   @map("invoice_id")
+  amountCents      Int      @map("amount_cents")
+  paymentDate      DateTime @default(now()) @map("payment_date")
+  reference        String?  // Bank transfer reference number
+  recordedByUserId String   @map("recorded_by_user_id")
+  notes            String?  @db.Text
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  invoice    Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  recordedBy User    @relation(fields: [recordedByUserId], references: [id])
+
+  @@map("invoice_payments")
+}
+
+model InvoiceSequence {
+  year       Int @id
+  lastNumber Int @default(0) @map("last_number")
+
+  @@map("invoice_sequences")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  agencyId      String?   @map("agency_id")
+  name          String?
+  email         String    @unique
+  emailVerified DateTime? @map("email_verified")
+  image         String?
+  role          UserRole  @default(REVIEWER)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  agency          Agency?          @relation(fields: [agencyId], references: [id])
+  accounts        Account[]
+  sessions        Session[]
+  policyChecks    PolicyCheck[]    @relation("CreatedBy")
+  signoffs        Signoff[]
+  auditLogs       AuditLog[]
+  invoicePayments InvoicePayment[]
+
+  @@index([agencyId])
+  @@map("users")
+}
+
+enum UserRole {
+  SUPERADMIN
+  ADMIN
+  REVIEWER
+  VIEWER
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// POLICY CHECK  (one comparison = two documents)
+// ═══════════════════════════════════════════════════════════════════
+
+model PolicyCheck {
+  id        String           @id @default(cuid())
+  agencyId  String           @map("agency_id")
+  createdBy String           @map("created_by")
+  title     String           @default("")
+  status    PolicyCheckStatus @default(PENDING)
+  createdAt DateTime         @default(now()) @map("created_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
+
+  // Cost tracking for margin analysis
+  apiCostCents Int @default(0) @map("api_cost_cents")
+
+  agency    Agency    @relation(fields: [agencyId], references: [id])
+  creator   User      @relation("CreatedBy", fields: [createdBy], references: [id])
+  documents Document[]
+  diffItems DiffItem[]
+  signoffs  Signoff[]
+
+  @@index([agencyId])
+  @@index([createdBy])
+  @@map("policy_checks")
+}
+
+enum PolicyCheckStatus {
+  PENDING        // Waiting for uploads
+  UPLOADING      // Files being uploaded
+  EXTRACTING     // LLM extraction in progress
+  DIFFING        // Deterministic diff running
+  SUMMARIZING    // LLM writing change summaries
+  READY          // Ready for human review
+  SIGNED_OFF     // All critical items reviewed and signed off
+  ERROR          // Something failed
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// DOCUMENTS  (uploaded PDFs)
+// ═══════════════════════════════════════════════════════════════════
+
+model Document {
+  id              String       @id @default(cuid())
+  policyCheckId   String       @map("policy_check_id")
+  role            DocumentRole
+  s3Key           String       @map("s3_key")
+  originalFilename String      @map("original_filename")
+  fileSizeBytes   Int          @map("file_size_bytes")
+  mimeType        String       @default("application/pdf") @map("mime_type")
+  pageCount       Int?         @map("page_count")
+  encryptedAtRest Boolean      @default(true) @map("encrypted_at_rest")
+
+  // Retention
+  retentionExpiresAt DateTime? @map("retention_expires_at")
+  deletedAt          DateTime? @map("deleted_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  policyCheck         PolicyCheck          @relation(fields: [policyCheckId], references: [id], onDelete: Cascade)
+  extractedCoverages  ExtractedCoverage[]
+  textBlocks          DocumentTextBlock[]
+
+  @@index([policyCheckId])
+  @@index([retentionExpiresAt])
+  @@map("documents")
+}
+
+enum DocumentRole {
+  EXPIRING   // The old / expiring policy
+  RENEWAL    // The new / renewal policy
+  QUOTE      // A quote document
+  BINDER     // A binder document
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// DOCUMENT TEXT BLOCKS  (per-page extracted text with coordinates)
+// ═══════════════════════════════════════════════════════════════════
+
+model DocumentTextBlock {
+  id         String @id @default(cuid())
+  documentId String @map("document_id")
+  page       Int    // 1-based page number
+  blockIndex Int    @map("block_index") // ordering within the page
+  text       String @db.Text
+  // Bounding box (PDF coordinates: x0, y0, x1, y1)
+  x0         Float
+  y0         Float
+  x1         Float
+  y1         Float
+  confidence Float? // OCR confidence (null if native text)
+  source     TextBlockSource @default(TEXT_LAYER)
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId, page])
+  @@map("document_text_blocks")
+}
+
+enum TextBlockSource {
+  TEXT_LAYER  // Native PDF text
+  OCR         // OCR-extracted
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// EXTRACTED COVERAGES  (structured data from LLM extraction)
+// ═══════════════════════════════════════════════════════════════════
+
+model ExtractedCoverage {
+  id            String  @id @default(cuid())
+  documentId    String  @map("document_id")
+  policyCheckId String  @map("policy_check_id")
+
+  // What type of coverage line this represents
+  coverageType  CoverageType @map("coverage_type")
+
+  // Canonical key for matching across documents (e.g., "GL_EACH_OCCURRENCE")
+  canonicalKey  String  @map("canonical_key")
+
+  // The full structured extraction as JSON — conforms to the extraction schema
+  // Includes: limits, deductibles, SIR, sub-limits, form numbers, exclusions, etc.
+  data          Json
+
+  // Source citations: array of {page, blockIds, boundingBox}
+  // Every field in `data` has a corresponding citation entry
+  sourceCitations Json @map("source_citations")
+
+  // Extraction quality
+  confidence    Float   @default(0)
+  verified      Boolean @default(false) // Set true after verification pass
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  document    Document    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([policyCheckId, canonicalKey])
+  @@index([documentId])
+  @@map("extracted_coverages")
+}
+
+enum CoverageType {
+  GENERAL_LIABILITY
+  PROPERTY
+  BOP
+  COMMERCIAL_AUTO
+  UMBRELLA
+  WORKERS_COMP
+  PROFESSIONAL_LIABILITY
+  CYBER
+  EPLI
+  INLAND_MARINE
+  OTHER
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// DIFF ITEMS  (deterministic comparison results)
+// ═══════════════════════════════════════════════════════════════════
+
+model DiffItem {
+  id            String    @id @default(cuid())
+  policyCheckId String    @map("policy_check_id")
+  category      String    // e.g. "General Liability", "Property", "Named Insureds"
+  canonicalKey  String    @map("canonical_key")
+  changeType    ChangeType @map("change_type")
+  severity      Severity
+  fieldPath     String    @map("field_path") // dotted path: "gl.eachOccurrence.limit"
+
+  // Values
+  oldValue      String?   @map("old_value") @db.Text
+  newValue      String?   @map("new_value") @db.Text
+
+  // Citations pointing to source docs
+  oldCitation   Json?     @map("old_citation") // {documentId, page, blockIds, boundingBox}
+  newCitation   Json?     @map("new_citation")
+
+  // LLM-generated plain-English summary (Step 5)
+  summary       String?   @db.Text
+
+  // Review state
+  reviewStatus  ReviewStatus @default(PENDING) @map("review_status")
+  reviewNote    String?      @map("review_note") @db.Text
+  reviewedBy    String?      @map("reviewed_by")
+  reviewedAt    DateTime?    @map("reviewed_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  policyCheck PolicyCheck @relation(fields: [policyCheckId], references: [id], onDelete: Cascade)
+
+  @@index([policyCheckId, severity])
+  @@index([policyCheckId, canonicalKey])
+  @@map("diff_items")
+}
+
+enum ChangeType {
+  ADDED
+  REMOVED
+  CHANGED
+}
+
+enum Severity {
+  CRITICAL  // Reduced limit, new exclusion, removed coverage
+  WARNING   // Deductible increase, SIR change
+  INFO      // Wording-only change
+}
+
+enum ReviewStatus {
+  PENDING
+  ACCEPTED
+  FLAGGED
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SIGNOFFS  (human sign-off on a completed review)
+// ═══════════════════════════════════════════════════════════════════
+
+model Signoff {
+  id            String       @id @default(cuid())
+  policyCheckId String       @map("policy_check_id")
+  userId        String       @map("user_id")
+  status        SignoffStatus
+  notes         String?      @db.Text
+  signedOffAt   DateTime     @default(now()) @map("signed_off_at")
+  createdAt     DateTime     @default(now()) @map("created_at")
+
+  policyCheck PolicyCheck @relation(fields: [policyCheckId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id])
+
+  @@index([policyCheckId])
+  @@map("signoffs")
+}
+
+enum SignoffStatus {
+  APPROVED
+  FLAGGED
+  REJECTED
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// AUDIT LOG  (immutable, append-only)
+// ═══════════════════════════════════════════════════════════════════
+
+model AuditLog {
+  id            String   @id @default(cuid())
+  agencyId      String   @map("agency_id")
+  userId        String?  @map("user_id")
+  policyCheckId String?  @map("policy_check_id")
+  action        String   // e.g. "document.uploaded", "diff.signed_off", "document.deleted"
+  details       Json?    // Additional context
+  ipAddress     String?  @map("ip_address")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  agency Agency @relation(fields: [agencyId], references: [id])
+  user   User?  @relation(fields: [userId], references: [id])
+
+  @@index([agencyId, createdAt])
+  @@index([policyCheckId])
+  @@index([action])
+  @@map("audit_log")
+}
