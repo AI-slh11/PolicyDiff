@@ -14,6 +14,8 @@
     "db:studio": "prisma studio",
     "retention:run": "tsx src/jobs/retention-cleanup.ts",
     "billing:run": "tsx src/jobs/billing-cron.ts",
+    "pages:build": "npx @cloudflare/next-on-pages",
+    "pages:deploy": "wrangler pages deploy",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -36,6 +38,7 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@cloudflare/next-on-pages": "^1.13.16",
     "@tailwindcss/postcss": "^4.0.0",
     "@types/node": "^22.0.0",
     "@types/nodemailer": "^6.4.0",
